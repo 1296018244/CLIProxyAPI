@@ -678,6 +678,10 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
+	if data, ok := managementasset.BundledManagementHTML(); ok {
+		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
+		return
+	}
 	filePath := managementasset.FilePath(s.configFilePath)
 	if strings.TrimSpace(filePath) == "" {
 		c.AbortWithStatus(http.StatusNotFound)

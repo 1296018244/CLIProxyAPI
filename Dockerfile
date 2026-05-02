@@ -35,6 +35,7 @@ EXPOSE 8317
 ENV TZ=Asia/Shanghai
 ENV MANAGEMENT_STATIC_PATH=/CLIProxyAPI/static/management.html
 ENV MANAGEMENT_DISABLE_AUTO_UPDATE_PANEL=true
+ENV MANAGEMENT_USE_BUNDLED_PANEL=true
 
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
 
