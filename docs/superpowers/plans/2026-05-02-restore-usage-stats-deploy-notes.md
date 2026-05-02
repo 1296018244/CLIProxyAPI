@@ -21,6 +21,7 @@ Recommended Render environment:
 ```text
 MANAGEMENT_PASSWORD=<strong password>
 USAGE_STATS_FILE=/data/cliproxy/usage.json
+MANAGEMENT_STATIC_PATH=/CLIProxyAPI/static/management.html
 ```
 
 If using a persistent disk, mount it at `/data` and keep `USAGE_STATS_FILE` under `/data`.
