@@ -162,6 +162,7 @@ func main() {
 			log.WithError(errLoad).Warn("failed to load .env file")
 		}
 	}
+	usageStatsFile := strings.TrimSpace(os.Getenv("USAGE_STATS_FILE"))
 
 	lookupEnv := func(keys ...string) (string, bool) {
 		for _, key := range keys {
@@ -422,6 +423,14 @@ func main() {
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	if usageStatsFile != "" {
+		result, errLoadUsage := usage.LoadSnapshotFile(usageStatsFile, usage.GetRequestStatistics())
+		if errLoadUsage != nil {
+			log.WithError(errLoadUsage).Warn("failed to load usage statistics snapshot")
+		} else if result.Added > 0 || result.Skipped > 0 {
+			log.Infof("usage statistics snapshot loaded: added=%d skipped=%d", result.Added, result.Skipped)
+		}
+	}
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)
@@ -460,6 +469,18 @@ func main() {
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
+
+	startUsagePersistence := func() func() {
+		if usageStatsFile == "" {
+			return func() {}
+		}
+		ctxUsage, cancelUsage := context.WithCancel(context.Background())
+		doneUsage := usage.StartSnapshotPersistence(ctxUsage, usageStatsFile, usage.GetRequestStatistics(), 5*time.Minute)
+		return func() {
+			cancelUsage()
+			<-doneUsage
+		}
+	}
 
 	// Handle different command modes based on the provided flags.
 
@@ -530,6 +551,8 @@ func main() {
 					password = localMgmtPassword
 				}
 
+				stopUsagePersistence := startUsagePersistence()
+				defer stopUsagePersistence()
 				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
 
 				client := tui.NewClient(cfg.Port, password)
@@ -577,6 +600,8 @@ func main() {
 			if !localModel {
 				registry.StartModelsUpdater(context.Background())
 			}
+			stopUsagePersistence := startUsagePersistence()
+			defer stopUsagePersistence()
 			cmd.StartService(cfg, configFilePath, password)
 		}
 	}
