@@ -1,0 +1,15 @@
+package management
+
+import "testing"
+
+func TestNormalizeRoutingStrategyQuotaRoundRobin(t *testing.T) {
+	for _, raw := range []string{"quota-round-robin", "quota-roundrobin", "quota-rr", "qrr"} {
+		got, ok := normalizeRoutingStrategy(raw)
+		if !ok {
+			t.Fatalf("normalizeRoutingStrategy(%q) ok=false, want true", raw)
+		}
+		if got != "quota-round-robin" {
+			t.Fatalf("normalizeRoutingStrategy(%q) = %q, want quota-round-robin", raw, got)
+		}
+	}
+}
