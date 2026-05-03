@@ -560,3 +560,21 @@ func TestManager_SchedulerTracksMarkResultCooldownAndRecovery(t *testing.T) {
 		t.Fatalf("len(seen) = %d, want %d", len(seen), 2)
 	}
 }
+
+func TestSchedulerPick_QuotaRoundRobinOrdersByRemainingQuota(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&QuotaRoundRobinSelector{},
+		&Auth{ID: "a-low", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"quota": map[string]any{"windows": []any{map[string]any{"id": "code-7d", "remaining_percent": 17}}}}},
+		&Auth{ID: "z-high", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"quota": map[string]any{"windows": []any{map[string]any{"id": "code-7d", "remaining_percent": 94}}}}},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "z-high" {
+		t.Fatalf("pickSingle() auth.ID = %q, want z-high", selectorTestAuthID(got))
+	}
+}
