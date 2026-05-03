@@ -534,6 +534,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.POST("/codex-quota/refresh-all", s.mgmt.RefreshAllCodexQuota)
 
 		mgmt.GET("/proxy-url", s.mgmt.GetProxyURL)
 		mgmt.PUT("/proxy-url", s.mgmt.PutProxyURL)

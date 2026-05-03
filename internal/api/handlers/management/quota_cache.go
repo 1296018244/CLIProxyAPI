@@ -18,6 +18,8 @@ const (
 	codexWhamUsagePath = "/backend-api/wham/usage"
 )
 
+var codexWhamUsageURL = "https://" + codexWhamUsageHost + codexWhamUsagePath
+
 type codexQuotaWindowSnapshot struct {
 	ID                 string
 	Label              string
@@ -70,7 +72,11 @@ func isCodexWhamUsageURL(rawURL string) bool {
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(parsed.Host, codexWhamUsageHost) && parsed.Path == codexWhamUsagePath
+	target, errTarget := url.Parse(strings.TrimSpace(codexWhamUsageURL))
+	if errTarget != nil || target.Host == "" {
+		return strings.EqualFold(parsed.Host, codexWhamUsageHost) && parsed.Path == codexWhamUsagePath
+	}
+	return strings.EqualFold(parsed.Host, target.Host) && parsed.Path == target.Path
 }
 
 func parseCodexQuotaWindowsForRouting(data []byte) ([]codexQuotaWindowSnapshot, float64, bool) {
