@@ -29,6 +29,9 @@ func TestBundledManagementHTMLContainsUsageStatsPanel(t *testing.T) {
 	if !bytes.Contains(data, []byte(`value:"quota-round-robin"`)) {
 		t.Fatal("bundled management panel does not expose quota-round-robin routing")
 	}
+	if !bytes.Contains(data, []byte(`value:"reset-time-round-robin"`)) {
+		t.Fatal("bundled management panel does not expose reset-time-round-robin routing")
+	}
 	if !bytes.Contains(data, []byte("quota_sort_label")) || !bytes.Contains(data, []byte("quotaSortOptions")) {
 		t.Fatal("bundled management panel does not contain quota sorting controls")
 	}

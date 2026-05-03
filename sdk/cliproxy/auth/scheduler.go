@@ -18,6 +18,7 @@ const (
 	schedulerStrategyCustom schedulerStrategy = iota
 	schedulerStrategyRoundRobin
 	schedulerStrategyQuotaRoundRobin
+	schedulerStrategyResetTimeRoundRobin
 	schedulerStrategyFillFirst
 )
 
@@ -53,6 +54,7 @@ type scheduledAuthMeta struct {
 	providerKey           string
 	priority              int
 	quotaRoutingSignature string
+	resetRoutingSignature string
 	virtualParent         string
 	websocketEnabled      bool
 	supportedModelSet     map[string]struct{}
@@ -181,6 +183,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
+	case *ResetTimeRoundRobinSelector:
+		return schedulerStrategyResetTimeRoundRobin
 	case nil, *RoundRobinSelector, *QuotaRoundRobinSelector:
 		return schedulerStrategyQuotaRoundRobin
 	default:
@@ -570,6 +574,7 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 		providerKey:           providerKey,
 		priority:              authPriority(auth),
 		quotaRoutingSignature: authQuotaRoutingSignature(auth),
+		resetRoutingSignature: authResetTimeRoutingSignature(auth),
 		virtualParent:         virtualParent,
 		websocketEnabled:      authWebsocketsEnabled(auth),
 		supportedModelSet:     supportedModelSetForAuth(auth.ID),
@@ -691,12 +696,12 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	previousState := entry.state
 	previousNextRetryAt := entry.nextRetryAt
 	previousPriority := 0
-	previousQuotaRoutingSignature := ""
+	previousRoutingSignature := ""
 	previousParent := ""
 	previousWebsocketEnabled := false
 	if entry.meta != nil {
 		previousPriority = scheduledMetaPriority(entry.meta, m.strategy)
-		previousQuotaRoutingSignature = entry.meta.quotaRoutingSignature
+		previousRoutingSignature = scheduledMetaRoutingSignature(entry.meta, m.strategy)
 		previousParent = entry.meta.virtualParent
 		previousWebsocketEnabled = entry.meta.websocketEnabled
 	}
@@ -719,7 +724,8 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	}
 
 	currentPriority := scheduledMetaPriority(meta, m.strategy)
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == currentPriority && previousQuotaRoutingSignature == meta.quotaRoutingSignature && previousParent == meta.virtualParent && previousWebsocketEnabled == meta.websocketEnabled {
+	currentRoutingSignature := scheduledMetaRoutingSignature(meta, m.strategy)
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == currentPriority && previousRoutingSignature == currentRoutingSignature && previousParent == meta.virtualParent && previousWebsocketEnabled == meta.websocketEnabled {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -935,7 +941,7 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
 func (m *modelScheduler) rebuildIndexesLocked() {
 	cursorStates := make(map[int]readyBucketCursorState)
-	if m.strategy != schedulerStrategyQuotaRoundRobin {
+	if m.strategy != schedulerStrategyQuotaRoundRobin && m.strategy != schedulerStrategyResetTimeRoundRobin {
 		cursorStates = make(map[int]readyBucketCursorState, len(m.readyByPriority))
 		for priority, bucket := range m.readyByPriority {
 			if bucket == nil {
@@ -997,18 +1003,35 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 }
 
 func scheduledMetaPriority(meta *scheduledAuthMeta, strategy schedulerStrategy) int {
-	if meta == nil || strategy == schedulerStrategyQuotaRoundRobin {
+	if meta == nil || strategy == schedulerStrategyQuotaRoundRobin || strategy == schedulerStrategyResetTimeRoundRobin {
 		return 0
 	}
 	return meta.priority
+}
+
+func scheduledMetaRoutingSignature(meta *scheduledAuthMeta, strategy schedulerStrategy) string {
+	if meta == nil {
+		return ""
+	}
+	switch strategy {
+	case schedulerStrategyQuotaRoundRobin:
+		return meta.quotaRoutingSignature
+	case schedulerStrategyResetTimeRoundRobin:
+		return meta.resetRoutingSignature
+	default:
+		return ""
+	}
 }
 
 func sortScheduledAuths(entries []*scheduledAuth, strategy schedulerStrategy) {
 	sort.Slice(entries, func(i, j int) bool {
 		left := entries[i]
 		right := entries[j]
-		if strategy == schedulerStrategyQuotaRoundRobin {
+		switch strategy {
+		case schedulerStrategyQuotaRoundRobin:
 			return authQuotaRoutingLess(left.auth, right.auth)
+		case schedulerStrategyResetTimeRoundRobin:
+			return authResetTimeRoutingLess(left.auth, right.auth)
 		}
 		return left.auth.ID < right.auth.ID
 	})

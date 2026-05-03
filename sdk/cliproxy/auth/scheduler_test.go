@@ -408,6 +408,11 @@ func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
 	if manager.scheduler.strategy != schedulerStrategyFillFirst {
 		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyFillFirst)
 	}
+
+	manager.SetSelector(&ResetTimeRoundRobinSelector{})
+	if manager.scheduler.strategy != schedulerStrategyResetTimeRoundRobin {
+		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyResetTimeRoundRobin)
+	}
 }
 
 func TestManager_SchedulerTracksRegisterAndUpdate(t *testing.T) {
@@ -706,5 +711,28 @@ func TestSchedulerPick_QuotaRoundRobinUsedFullQuotaFallsBehindResetCandidate(t *
 	}
 	if got == nil || got.ID != "used-quota-soon-reset" {
 		t.Fatalf("pickSingle() auth.ID = %q, want used-quota-soon-reset", selectorTestAuthID(got))
+	}
+}
+
+func TestSchedulerPick_ResetTimeRoundRobinOrdersOnlyByResetTime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	scheduler := newSchedulerForTest(
+		&ResetTimeRoundRobinSelector{},
+		&Auth{ID: "no-reset", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"quota_remaining_percent": 99}},
+		&Auth{ID: "full-quota-later-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(100, now.Add(time.Hour))},
+		&Auth{ID: "used-quota-soon-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(10*time.Minute))},
+	)
+
+	want := []string{"used-quota-soon-reset", "full-quota-later-reset", "no-reset", "used-quota-soon-reset"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, selectorTestAuthID(got), wantID)
+		}
 	}
 }

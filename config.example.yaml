@@ -113,7 +113,7 @@ quota-exceeded:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "quota-round-robin" # quota-round-robin (default; round-robin aliases use quota ordering), fill-first
+  strategy: "quota-round-robin" # quota-round-robin (default; quota ordering), reset-time-round-robin (soonest reset first), fill-first
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: metadata.user_id (Claude Code session format),
   # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),

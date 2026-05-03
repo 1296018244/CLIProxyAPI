@@ -635,6 +635,8 @@ func (s *Service) Run(ctx context.Context) error {
 			switch strategy {
 			case "fill-first", "fillfirst", "ff":
 				return "fill-first"
+			case "reset-time-round-robin", "reset-time-roundrobin", "reset-time-rr", "reset-rr", "rtrr":
+				return "reset-time-round-robin"
 			case "", "round-robin", "roundrobin", "rr", "quota-round-robin", "quota-roundrobin", "quota-rr", "qrr":
 				return "quota-round-robin"
 			default:
@@ -656,6 +658,8 @@ func (s *Service) Run(ctx context.Context) error {
 			switch nextStrategy {
 			case "fill-first":
 				selector = &coreauth.FillFirstSelector{}
+			case "reset-time-round-robin":
+				selector = &coreauth.ResetTimeRoundRobinSelector{}
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}

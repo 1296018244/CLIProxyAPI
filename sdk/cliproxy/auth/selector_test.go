@@ -1610,6 +1610,48 @@ func TestRoundRobinSelectorPick_ResetAfterSecondsUsesQuotaUpdatedAt(t *testing.T
 	}
 }
 
+func TestResetTimeRoundRobinSelectorPick_ResetSoonBeforeFullQuota(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	selector := &ResetTimeRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "full-quota-later-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(100, now.Add(time.Hour))},
+		{ID: "used-quota-soon-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(10*time.Minute))},
+		{ID: "no-reset", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"quota_remaining_percent": 99}},
+	}
+
+	want := []string{"used-quota-soon-reset", "full-quota-later-reset", "no-reset", "used-quota-soon-reset"}
+	for index, wantID := range want {
+		got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", index, err)
+		}
+		if got == nil || got.ID != wantID {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", index, selectorTestAuthID(got), wantID)
+		}
+	}
+}
+
+func TestResetTimeRoundRobinSelectorPick_TieUsesIDNotRemainingQuota(t *testing.T) {
+	t.Parallel()
+
+	resetAt := time.Date(2026, 5, 3, 12, 30, 0, 0, time.UTC)
+	selector := &ResetTimeRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "a-lower-quota", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(70, resetAt)},
+		{ID: "b-higher-quota", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(90, resetAt)},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "a-lower-quota" {
+		t.Fatalf("Pick() auth.ID = %q, want a-lower-quota", selectorTestAuthID(got))
+	}
+}
+
 func TestQuotaRoundRobinSelectorPick_UsedPercentFallback(t *testing.T) {
 	t.Parallel()
 

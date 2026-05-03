@@ -36,6 +36,11 @@ type QuotaRoundRobinSelector struct {
 	RoundRobinSelector
 }
 
+// ResetTimeRoundRobinSelector orders credentials by the soonest quota reset time.
+type ResetTimeRoundRobinSelector struct {
+	RoundRobinSelector
+}
+
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
@@ -48,6 +53,13 @@ const (
 	blockReasonCooldown
 	blockReasonDisabled
 	blockReasonOther
+)
+
+type roundRobinOrder int
+
+const (
+	roundRobinOrderQuota roundRobinOrder = iota
+	roundRobinOrderResetTime
 )
 
 type modelCooldownError struct {
@@ -176,6 +188,53 @@ func authQuotaRoutingInfoForAuth(auth *Auth) authQuotaRoutingInfo {
 		attrMap[key] = value
 	}
 	return quotaRoutingInfoFromMap(attrMap, true)
+}
+
+func authResetTimeRoutingSignature(auth *Auth) string {
+	info := authResetTimeRoutingInfoForAuth(auth)
+	if !info.hasReset {
+		return "false"
+	}
+	return "true|" + strconv.FormatInt(info.resetAt.UnixNano(), 10)
+}
+
+func authResetTimeRoutingInfoForAuth(auth *Auth) authQuotaRoutingInfo {
+	if auth == nil {
+		return authQuotaRoutingInfo{}
+	}
+	if info := resetTimeRoutingInfoFromMap(auth.Metadata, true); info.hasReset {
+		return info
+	}
+	if len(auth.Attributes) == 0 {
+		return authQuotaRoutingInfo{}
+	}
+	attrMap := make(map[string]any, len(auth.Attributes))
+	for key, value := range auth.Attributes {
+		attrMap[key] = value
+	}
+	return resetTimeRoutingInfoFromMap(attrMap, true)
+}
+
+func resetTimeRoutingInfoFromMap(values map[string]any, allowDirect bool) authQuotaRoutingInfo {
+	info := authQuotaRoutingInfo{}
+	if len(values) == 0 {
+		return info
+	}
+	window, context, okWindow := weeklyQuotaWindowFromMap(values)
+	if okWindow {
+		if resetAt, ok := quotaResetAtFromWindow(window, context); ok {
+			info.resetAt = resetAt
+			info.hasReset = true
+			return info
+		}
+	}
+	if allowDirect {
+		if resetAt, ok := directQuotaResetAtFromMap(values); ok {
+			info.resetAt = resetAt
+			info.hasReset = true
+		}
+	}
+	return info
 }
 
 func quotaRoutingInfoFromMap(values map[string]any, allowDirect bool) authQuotaRoutingInfo {
@@ -584,6 +643,12 @@ func sortAuthsByQuotaThenID(auths []*Auth) {
 	})
 }
 
+func sortAuthsByResetTimeThenID(auths []*Auth) {
+	sort.Slice(auths, func(i, j int) bool {
+		return authResetTimeRoutingLess(auths[i], auths[j])
+	})
+}
+
 func preferFullQuotaAuths(auths []*Auth) []*Auth {
 	full := make([]*Auth, 0)
 	for _, auth := range auths {
@@ -616,6 +681,26 @@ func authQuotaRoutingLess(left, right *Auth) bool {
 	}
 	if leftInfo.hasRemaining && rightInfo.hasRemaining && leftInfo.remaining != rightInfo.remaining {
 		return leftInfo.remaining > rightInfo.remaining
+	}
+	leftID := ""
+	if left != nil {
+		leftID = left.ID
+	}
+	rightID := ""
+	if right != nil {
+		rightID = right.ID
+	}
+	return leftID < rightID
+}
+
+func authResetTimeRoutingLess(left, right *Auth) bool {
+	leftInfo := authResetTimeRoutingInfoForAuth(left)
+	rightInfo := authResetTimeRoutingInfoForAuth(right)
+	if leftInfo.hasReset != rightInfo.hasReset {
+		return leftInfo.hasReset
+	}
+	if leftInfo.hasReset && rightInfo.hasReset && !leftInfo.resetAt.Equal(rightInfo.resetAt) {
+		return leftInfo.resetAt.Before(rightInfo.resetAt)
 	}
 	leftID := ""
 	if left != nil {
@@ -769,24 +854,33 @@ func getAvailableAuthsWithPriority(auths []*Auth, provider, model string, now ti
 // a two-level round-robin is used: first cycling across credential groups (parent
 // accounts), then cycling within each group's project auths.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	return s.pick(ctx, provider, model, opts, auths, true)
+	return s.pick(ctx, provider, model, opts, auths, roundRobinOrderQuota)
 }
 
 func (s *QuotaRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	return s.RoundRobinSelector.pick(ctx, provider, model, opts, auths, true)
+	return s.RoundRobinSelector.pick(ctx, provider, model, opts, auths, roundRobinOrderQuota)
 }
 
-func (s *RoundRobinSelector) pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, quotaAware bool) (*Auth, error) {
+func (s *ResetTimeRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return s.RoundRobinSelector.pick(ctx, provider, model, opts, auths, roundRobinOrderResetTime)
+}
+
+func (s *RoundRobinSelector) pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, order roundRobinOrder) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuthsWithPriority(auths, provider, model, now, !quotaAware)
+	available, err := getAvailableAuthsWithPriority(auths, provider, model, now, false)
 	if err != nil {
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	if quotaAware && len(available) > 1 {
-		sortAuthsByQuotaThenID(available)
-		available = preferFullQuotaAuths(available)
+	if len(available) > 1 {
+		switch order {
+		case roundRobinOrderResetTime:
+			sortAuthsByResetTimeThenID(available)
+		default:
+			sortAuthsByQuotaThenID(available)
+			available = preferFullQuotaAuths(available)
+		}
 	}
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
