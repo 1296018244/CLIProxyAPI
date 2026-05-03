@@ -146,6 +146,11 @@ func authRemainingQuotaPercent(auth *Auth) (float64, bool) {
 	return info.remaining, info.hasRemaining
 }
 
+func authQuotaRoutingIsFull(auth *Auth) bool {
+	info := authQuotaRoutingInfoForAuth(auth)
+	return info.hasRemaining && info.remaining >= 100
+}
+
 func authQuotaRoutingInfoForAuth(auth *Auth) authQuotaRoutingInfo {
 	if auth == nil {
 		return authQuotaRoutingInfo{}
@@ -501,9 +506,27 @@ func sortAuthsByQuotaThenID(auths []*Auth) {
 	})
 }
 
+func preferFullQuotaAuths(auths []*Auth) []*Auth {
+	full := make([]*Auth, 0)
+	for _, auth := range auths {
+		if authQuotaRoutingIsFull(auth) {
+			full = append(full, auth)
+		}
+	}
+	if len(full) == 0 {
+		return auths
+	}
+	return full
+}
+
 func authQuotaRoutingLess(left, right *Auth) bool {
 	leftInfo := authQuotaRoutingInfoForAuth(left)
 	rightInfo := authQuotaRoutingInfoForAuth(right)
+	leftFull := leftInfo.hasRemaining && leftInfo.remaining >= 100
+	rightFull := rightInfo.hasRemaining && rightInfo.remaining >= 100
+	if leftFull != rightFull {
+		return leftFull
+	}
 	if leftInfo.hasReset != rightInfo.hasReset {
 		return leftInfo.hasReset
 	}
@@ -675,6 +698,7 @@ func (s *RoundRobinSelector) pick(ctx context.Context, provider, model string, o
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	if quotaAware && len(available) > 1 {
 		sortAuthsByQuotaThenID(available)
+		available = preferFullQuotaAuths(available)
 	}
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()

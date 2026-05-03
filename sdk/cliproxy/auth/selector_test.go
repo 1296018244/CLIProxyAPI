@@ -1514,7 +1514,7 @@ func TestRoundRobinSelectorPick_ResetSoonBeforeHigherQuota(t *testing.T) {
 	}
 }
 
-func TestRoundRobinSelectorPick_FullQuotaDoesNotUseResetPriority(t *testing.T) {
+func TestRoundRobinSelectorPick_FullQuotaIsUsedBeforeResetPriority(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
@@ -1528,8 +1528,50 @@ func TestRoundRobinSelectorPick_FullQuotaDoesNotUseResetPriority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
-	if got == nil || got.ID != "used-quota-later-reset" {
-		t.Fatalf("Pick() auth.ID = %q, want used-quota-later-reset", selectorTestAuthID(got))
+	if got == nil || got.ID != "full-quota-soon-reset" {
+		t.Fatalf("Pick() auth.ID = %q, want full-quota-soon-reset", selectorTestAuthID(got))
+	}
+}
+
+func TestRoundRobinSelectorPick_FullQuotaBeforeResetCandidates(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "used-quota-soon-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(10*time.Minute))},
+		{ID: "full-quota", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(100, now.Add(time.Hour))},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "full-quota" {
+		t.Fatalf("Pick() auth.ID = %q, want full-quota", selectorTestAuthID(got))
+	}
+}
+
+func TestRoundRobinSelectorPick_FullQuotaGroupRotatesBeforeResetCandidates(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "used-quota-soon-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(10*time.Minute))},
+		{ID: "full-b", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(100, now.Add(time.Hour))},
+		{ID: "full-a", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(100, now.Add(2*time.Hour))},
+	}
+
+	want := []string{"full-a", "full-b", "full-a"}
+	for index, wantID := range want {
+		got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", index, err)
+		}
+		if got == nil || got.ID != wantID {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", index, selectorTestAuthID(got), wantID)
+		}
 	}
 }
 

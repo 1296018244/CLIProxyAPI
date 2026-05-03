@@ -597,3 +597,26 @@ func TestSchedulerPick_QuotaRoundRobinOrdersByResetTime(t *testing.T) {
 		t.Fatalf("pickSingle() auth.ID = %q, want lower-quota-sooner-reset", selectorTestAuthID(got))
 	}
 }
+
+func TestSchedulerPick_QuotaRoundRobinFullQuotaBeforeResetTime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	scheduler := newSchedulerForTest(
+		&QuotaRoundRobinSelector{},
+		&Auth{ID: "used-quota-soon-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(10*time.Minute))},
+		&Auth{ID: "full-b", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(100, now.Add(time.Hour))},
+		&Auth{ID: "full-a", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(100, now.Add(2*time.Hour))},
+	)
+
+	want := []string{"full-a", "full-b", "full-a"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil || got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, selectorTestAuthID(got), wantID)
+		}
+	}
+}

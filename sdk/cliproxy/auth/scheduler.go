@@ -381,7 +381,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 	for providerIndex, shard := range candidateShards {
 		segmentStarts[providerIndex] = totalWeight
 		if shard != nil {
-			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority)
+			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority, s.strategy)
 		}
 		totalWeight += weights[providerIndex]
 		segmentEnds[providerIndex] = totalWeight
@@ -825,11 +825,23 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
 		view = &bucket.ws
 	}
+	effectivePredicate := predicate
+	if strategy == schedulerStrategyQuotaRoundRobin {
+		fullQuotaPredicate := func(entry *scheduledAuth) bool {
+			if predicate != nil && !predicate(entry) {
+				return false
+			}
+			return entry != nil && authQuotaRoutingIsFull(entry.auth)
+		}
+		if view.pickFirst(fullQuotaPredicate) != nil {
+			effectivePredicate = fullQuotaPredicate
+		}
+	}
 	var picked *scheduledAuth
 	if strategy == schedulerStrategyFillFirst {
-		picked = view.pickFirst(predicate)
+		picked = view.pickFirst(effectivePredicate)
 	} else {
-		picked = view.pickRoundRobin(predicate)
+		picked = view.pickRoundRobin(effectivePredicate)
 	}
 	if picked == nil || picked.auth == nil {
 		return nil
@@ -837,7 +849,7 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priorit
 	return picked.auth
 }
 
-func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int) int {
+func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy) int {
 	if m == nil {
 		return 0
 	}
@@ -846,9 +858,25 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 		return 0
 	}
 	if preferWebsocket && len(bucket.ws.flat) > 0 {
-		return len(bucket.ws.flat)
+		return readyViewCountForStrategy(bucket.ws, strategy)
 	}
-	return len(bucket.all.flat)
+	return readyViewCountForStrategy(bucket.all, strategy)
+}
+
+func readyViewCountForStrategy(view readyView, strategy schedulerStrategy) int {
+	if strategy != schedulerStrategyQuotaRoundRobin {
+		return len(view.flat)
+	}
+	fullCount := 0
+	for _, entry := range view.flat {
+		if entry != nil && authQuotaRoutingIsFull(entry.auth) {
+			fullCount++
+		}
+	}
+	if fullCount > 0 {
+		return fullCount
+	}
+	return len(view.flat)
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
