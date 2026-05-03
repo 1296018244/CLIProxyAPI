@@ -400,8 +400,8 @@ func TestManager_InitializesSchedulerForBuiltInSelector(t *testing.T) {
 	if manager.scheduler == nil {
 		t.Fatalf("manager.scheduler = nil")
 	}
-	if manager.scheduler.strategy != schedulerStrategyRoundRobin {
-		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyRoundRobin)
+	if manager.scheduler.strategy != schedulerStrategyQuotaRoundRobin {
+		t.Fatalf("manager.scheduler.strategy = %v, want %v", manager.scheduler.strategy, schedulerStrategyQuotaRoundRobin)
 	}
 
 	manager.SetSelector(&FillFirstSelector{})

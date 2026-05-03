@@ -1477,6 +1477,24 @@ func TestQuotaRoundRobinSelectorPick_OrdersByRemainingQuota(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_OrdersByRemainingQuota(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "low", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"quota_remaining_percent": 17}},
+		{ID: "high", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"quota_remaining_percent": 94}},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "high" {
+		t.Fatalf("Pick() auth = %v, want high", got)
+	}
+}
+
 func TestQuotaRoundRobinSelectorPick_UsedPercentFallback(t *testing.T) {
 	t.Parallel()
 

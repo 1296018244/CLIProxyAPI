@@ -3,7 +3,7 @@ package management
 import "testing"
 
 func TestNormalizeRoutingStrategyQuotaRoundRobin(t *testing.T) {
-	for _, raw := range []string{"quota-round-robin", "quota-roundrobin", "quota-rr", "qrr"} {
+	for _, raw := range []string{"", "round-robin", "roundrobin", "rr", "quota-round-robin", "quota-roundrobin", "quota-rr", "qrr"} {
 		got, ok := normalizeRoutingStrategy(raw)
 		if !ok {
 			t.Fatalf("normalizeRoutingStrategy(%q) ok=false, want true", raw)

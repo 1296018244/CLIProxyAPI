@@ -283,7 +283,7 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(strategy))
 	switch normalized {
 	case "", "round-robin", "roundrobin", "rr":
-		return "round-robin", true
+		return "quota-round-robin", true
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
 	case "quota-round-robin", "quota-roundrobin", "quota-rr", "qrr":

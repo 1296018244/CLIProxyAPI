@@ -23,6 +23,15 @@ func TestBundledManagementHTMLContainsUsageStatsPanel(t *testing.T) {
 	if !bytes.Contains(data, []byte(`const Ce=he.current==="all"?"all":"page",_e=he.current==="all"?D:Y;_e.length!==0&&E(_e,Ce,$)`)) {
 		t.Fatal("bundled management panel does not keep separate page and all refresh scopes")
 	}
+	if bytes.Contains(data, []byte(`value:"round-robin"`)) {
+		t.Fatal("bundled management panel still exposes plain round-robin routing")
+	}
+	if !bytes.Contains(data, []byte(`value:"quota-round-robin"`)) {
+		t.Fatal("bundled management panel does not expose quota-round-robin routing")
+	}
+	if !bytes.Contains(data, []byte("quota_sort_label")) || !bytes.Contains(data, []byte("quotaSortOptions")) {
+		t.Fatal("bundled management panel does not contain quota sorting controls")
+	}
 	if bytes.Contains(data, []byte(`Use the top "Refresh all credentials" button`)) {
 		t.Fatal("bundled management panel still points idle hint at refresh-all only")
 	}

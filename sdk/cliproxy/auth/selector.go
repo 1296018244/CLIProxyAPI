@@ -23,14 +23,15 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
-// RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
+// RoundRobinSelector provides provider-scoped round-robin selection after
+// ordering credentials by remaining quota when quota data is available.
 type RoundRobinSelector struct {
 	mu      sync.Mutex
 	cursors map[string]int
 	maxKeys int
 }
 
-// QuotaRoundRobinSelector round-robins credentials after sorting by remaining quota percentage.
+// QuotaRoundRobinSelector is kept as a named alias for quota-aware round robin.
 type QuotaRoundRobinSelector struct {
 	RoundRobinSelector
 }
@@ -428,7 +429,7 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 // a two-level round-robin is used: first cycling across credential groups (parent
 // accounts), then cycling within each group's project auths.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	return s.pick(ctx, provider, model, opts, auths, false)
+	return s.pick(ctx, provider, model, opts, auths, true)
 }
 
 func (s *QuotaRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {

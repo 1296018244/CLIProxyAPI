@@ -180,10 +180,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
-	case *QuotaRoundRobinSelector:
+	case nil, *RoundRobinSelector, *QuotaRoundRobinSelector:
 		return schedulerStrategyQuotaRoundRobin
-	case nil, *RoundRobinSelector:
-		return schedulerStrategyRoundRobin
 	default:
 		return schedulerStrategyCustom
 	}
