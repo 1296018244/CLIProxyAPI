@@ -70,7 +70,7 @@ func registerSchedulerModels(t *testing.T, provider string, model string, authID
 	})
 }
 
-func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
+func TestSchedulerPick_QuotaRoundRobinIgnoresPriority(t *testing.T) {
 	t.Parallel()
 
 	scheduler := newSchedulerForTest(
@@ -80,7 +80,7 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 		&Auth{ID: "high-a", Provider: "gemini", Attributes: map[string]string{"priority": "10"}},
 	)
 
-	want := []string{"high-a", "high-b", "high-a"}
+	want := []string{"high-a", "high-b", "low"}
 	for index, wantID := range want {
 		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -263,7 +263,7 @@ func TestSchedulerPick_MixedProvidersUsesWeightedProviderRotationOverReadyCandid
 	}
 }
 
-func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
+func TestSchedulerPick_MixedProvidersQuotaRoundRobinIgnoresPriority(t *testing.T) {
 	t.Parallel()
 
 	model := "gpt-default"
@@ -279,8 +279,8 @@ func TestSchedulerPick_MixedProvidersPrefersHighestPriorityTier(t *testing.T) {
 	)
 
 	providers := []string{"provider-low", "provider-high-a", "provider-high-b"}
-	wantProviders := []string{"provider-high-a", "provider-high-b", "provider-high-a", "provider-high-b"}
-	wantIDs := []string{"high-a", "high-b", "high-a", "high-b"}
+	wantProviders := []string{"provider-low", "provider-high-a", "provider-high-b", "provider-low"}
+	wantIDs := []string{"low", "high-a", "high-b", "low"}
 	for index := range wantProviders {
 		got, provider, errPick := scheduler.pickMixed(context.Background(), providers, model, cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
@@ -618,5 +618,93 @@ func TestSchedulerPick_QuotaRoundRobinFullQuotaBeforeResetTime(t *testing.T) {
 		if got == nil || got.ID != wantID {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, selectorTestAuthID(got), wantID)
 		}
+	}
+}
+
+func TestSchedulerPick_QuotaRoundRobinDemotesFullQuotaAfterUse(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	auths := []*Auth{
+		{ID: "used-quota-soon-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(10*time.Minute))},
+		{ID: "full-b", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(100, now.Add(time.Hour))},
+		{ID: "full-a", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(100, now.Add(2*time.Hour))},
+	}
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", auth.ID, errRegister)
+		}
+	}
+
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() #0 error = %v", errPick)
+	}
+	if got == nil || got.ID != "full-a" {
+		t.Fatalf("pickSingle() #0 auth.ID = %q, want full-a", selectorTestAuthID(got))
+	}
+	manager.MarkResult(context.Background(), Result{AuthID: "full-a", Provider: "codex", Success: true})
+
+	got, errPick = manager.scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() #1 error = %v", errPick)
+	}
+	if got == nil || got.ID != "full-b" {
+		t.Fatalf("pickSingle() #1 auth.ID = %q, want full-b", selectorTestAuthID(got))
+	}
+	manager.MarkResult(context.Background(), Result{AuthID: "full-b", Provider: "codex", Success: true})
+
+	got, errPick = manager.scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() #2 error = %v", errPick)
+	}
+	if got == nil || got.ID != "used-quota-soon-reset" {
+		t.Fatalf("pickSingle() #2 auth.ID = %q, want used-quota-soon-reset", selectorTestAuthID(got))
+	}
+}
+
+func TestSchedulerPick_QuotaRoundRobinReordersAfterQuotaUpdate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "a", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(3*time.Hour))}); errRegister != nil {
+		t.Fatalf("Register(a) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "b", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(4*time.Hour))}); errRegister != nil {
+		t.Fatalf("Register(b) error = %v", errRegister)
+	}
+
+	if _, errUpdate := manager.Update(context.Background(), &Auth{ID: "b", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(10*time.Minute))}); errUpdate != nil {
+		t.Fatalf("Update(b) error = %v", errUpdate)
+	}
+
+	got, errPick := manager.scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "b" {
+		t.Fatalf("pickSingle() auth.ID = %q, want b", selectorTestAuthID(got))
+	}
+}
+
+func TestSchedulerPick_QuotaRoundRobinUsedFullQuotaFallsBehindResetCandidate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	scheduler := newSchedulerForTest(
+		&QuotaRoundRobinSelector{},
+		&Auth{ID: "used-full-a", Provider: "codex", Status: StatusActive, Metadata: usedFullQuotaMetadata(now)},
+		&Auth{ID: "used-full-b", Provider: "codex", Status: StatusActive, Metadata: usedFullQuotaMetadata(now)},
+		&Auth{ID: "used-quota-soon-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(10*time.Minute))},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "used-quota-soon-reset" {
+		t.Fatalf("pickSingle() auth.ID = %q, want used-quota-soon-reset", selectorTestAuthID(got))
 	}
 }

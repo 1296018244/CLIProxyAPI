@@ -141,6 +141,8 @@ type authQuotaRoutingInfo struct {
 	hasReset     bool
 }
 
+const quotaRoutingLastUsedAtKey = "quota_routing_last_used_at"
+
 func authRemainingQuotaPercent(auth *Auth) (float64, bool) {
 	info := authQuotaRoutingInfoForAuth(auth)
 	return info.remaining, info.hasRemaining
@@ -148,7 +150,15 @@ func authRemainingQuotaPercent(auth *Auth) (float64, bool) {
 
 func authQuotaRoutingIsFull(auth *Auth) bool {
 	info := authQuotaRoutingInfoForAuth(auth)
-	return info.hasRemaining && info.remaining >= 100
+	if !info.hasRemaining || info.remaining < 100 {
+		return false
+	}
+	usedAt, okUsed := authQuotaRoutingLastUsedAt(auth)
+	if !okUsed {
+		return true
+	}
+	updatedAt, okUpdated := authQuotaRoutingUpdatedAt(auth)
+	return okUpdated && !usedAt.After(updatedAt)
 }
 
 func authQuotaRoutingInfoForAuth(auth *Auth) authQuotaRoutingInfo {
@@ -199,6 +209,74 @@ func quotaRoutingInfoFromMap(values map[string]any, allowDirect bool) authQuotaR
 		}
 	}
 	return info
+}
+
+func authQuotaRoutingSignature(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	info := authQuotaRoutingInfoForAuth(auth)
+	parts := []string{
+		strconv.FormatBool(authQuotaRoutingIsFull(auth)),
+		strconv.FormatBool(info.hasRemaining),
+		strconv.FormatFloat(info.remaining, 'f', 6, 64),
+		strconv.FormatBool(info.hasReset),
+	}
+	if info.hasReset {
+		parts = append(parts, strconv.FormatInt(info.resetAt.UnixNano(), 10))
+	}
+	return strings.Join(parts, "|")
+}
+
+func authQuotaRoutingLastUsedAt(auth *Auth) (time.Time, bool) {
+	if auth == nil {
+		return time.Time{}, false
+	}
+	if lastUsedAt, ok := quotaRoutingTimestampFromMap(auth.Metadata, quotaRoutingLastUsedAtKey, "quotaRoutingLastUsedAt"); ok {
+		return lastUsedAt, true
+	}
+	if len(auth.Attributes) == 0 {
+		return time.Time{}, false
+	}
+	attrMap := make(map[string]any, len(auth.Attributes))
+	for key, value := range auth.Attributes {
+		attrMap[key] = value
+	}
+	return quotaRoutingTimestampFromMap(attrMap, quotaRoutingLastUsedAtKey, "quotaRoutingLastUsedAt")
+}
+
+func authQuotaRoutingUpdatedAt(auth *Auth) (time.Time, bool) {
+	if auth == nil {
+		return time.Time{}, false
+	}
+	if quota, ok := nestedMap(auth.Metadata, "quota"); ok {
+		if updatedAt, okUpdated := quotaUpdatedAt(quota); okUpdated {
+			return updatedAt, true
+		}
+	}
+	if updatedAt, okUpdated := quotaUpdatedAt(auth.Metadata); okUpdated {
+		return updatedAt, true
+	}
+	if len(auth.Attributes) == 0 {
+		return time.Time{}, false
+	}
+	attrMap := make(map[string]any, len(auth.Attributes))
+	for key, value := range auth.Attributes {
+		attrMap[key] = value
+	}
+	return quotaUpdatedAt(attrMap)
+}
+
+func quotaRoutingTimestampFromMap(values map[string]any, keys ...string) (time.Time, bool) {
+	if len(values) == 0 {
+		return time.Time{}, false
+	}
+	for _, key := range keys {
+		if timestamp, ok := parseQuotaResetTimestamp(values[key]); ok {
+			return timestamp, true
+		}
+	}
+	return time.Time{}, false
 }
 
 func quotaPercentFromMap(values map[string]any, allowDirect bool) (float64, bool) {
@@ -360,7 +438,7 @@ func parseQuotaPercent(raw any, fractionAllowed bool) (float64, bool) {
 }
 
 func normalizeQuotaPercent(value float64, fractionAllowed bool) float64 {
-	if fractionAllowed && value >= 0 && value <= 1 {
+	if fractionAllowed && value >= 0 && value < 1 {
 		value *= 100
 	}
 	return clampPercent(value)
@@ -522,8 +600,8 @@ func preferFullQuotaAuths(auths []*Auth) []*Auth {
 func authQuotaRoutingLess(left, right *Auth) bool {
 	leftInfo := authQuotaRoutingInfoForAuth(left)
 	rightInfo := authQuotaRoutingInfoForAuth(right)
-	leftFull := leftInfo.hasRemaining && leftInfo.remaining >= 100
-	rightFull := rightInfo.hasRemaining && rightInfo.remaining >= 100
+	leftFull := authQuotaRoutingIsFull(left)
+	rightFull := authQuotaRoutingIsFull(right)
 	if leftFull != rightFull {
 		return leftFull
 	}
@@ -640,6 +718,10 @@ func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (ava
 }
 
 func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	return getAvailableAuthsWithPriority(auths, provider, model, now, true)
+}
+
+func getAvailableAuthsWithPriority(auths []*Auth, provider, model string, now time.Time, respectPriority bool) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
@@ -660,16 +742,22 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
 	}
 
-	bestPriority := 0
-	found := false
-	for priority := range availableByPriority {
-		if !found || priority > bestPriority {
-			bestPriority = priority
-			found = true
+	available := make([]*Auth, 0)
+	if respectPriority {
+		bestPriority := 0
+		found := false
+		for priority := range availableByPriority {
+			if !found || priority > bestPriority {
+				bestPriority = priority
+				found = true
+			}
+		}
+		available = append(available, availableByPriority[bestPriority]...)
+	} else {
+		for _, bucket := range availableByPriority {
+			available = append(available, bucket...)
 		}
 	}
-
-	available := availableByPriority[bestPriority]
 	if len(available) > 1 {
 		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	}
@@ -691,7 +779,7 @@ func (s *QuotaRoundRobinSelector) Pick(ctx context.Context, provider, model stri
 func (s *RoundRobinSelector) pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, quotaAware bool) (*Auth, error) {
 	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuthsWithPriority(auths, provider, model, now, !quotaAware)
 	if err != nil {
 		return nil, err
 	}

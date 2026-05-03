@@ -2027,6 +2027,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.recordRecentRequest(now, result.Success)
 		if result.Success {
 			auth.Success++
+			markAuthQuotaRoutingUsed(auth, now)
 		} else {
 			auth.Failed++
 		}
@@ -2165,6 +2166,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+}
+
+func markAuthQuotaRoutingUsed(auth *Auth, at time.Time) {
+	if auth == nil {
+		return
+	}
+	info := authQuotaRoutingInfoForAuth(auth)
+	if !info.hasRemaining {
+		return
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata[quotaRoutingLastUsedAtKey] = at.UTC().Format(time.RFC3339Nano)
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {

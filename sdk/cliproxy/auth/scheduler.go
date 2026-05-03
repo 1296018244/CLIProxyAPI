@@ -49,12 +49,13 @@ type providerScheduler struct {
 
 // scheduledAuthMeta stores the immutable scheduling fields derived from an auth snapshot.
 type scheduledAuthMeta struct {
-	auth              *Auth
-	providerKey       string
-	priority          int
-	virtualParent     string
-	websocketEnabled  bool
-	supportedModelSet map[string]struct{}
+	auth                  *Auth
+	providerKey           string
+	priority              int
+	quotaRoutingSignature string
+	virtualParent         string
+	websocketEnabled      bool
+	supportedModelSet     map[string]struct{}
 }
 
 // modelScheduler tracks ready and blocked auths for one provider/model combination.
@@ -565,12 +566,13 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 		virtualParent = strings.TrimSpace(auth.Attributes["gemini_virtual_parent"])
 	}
 	return &scheduledAuthMeta{
-		auth:              auth,
-		providerKey:       providerKey,
-		priority:          authPriority(auth),
-		virtualParent:     virtualParent,
-		websocketEnabled:  authWebsocketsEnabled(auth),
-		supportedModelSet: supportedModelSetForAuth(auth.ID),
+		auth:                  auth,
+		providerKey:           providerKey,
+		priority:              authPriority(auth),
+		quotaRoutingSignature: authQuotaRoutingSignature(auth),
+		virtualParent:         virtualParent,
+		websocketEnabled:      authWebsocketsEnabled(auth),
+		supportedModelSet:     supportedModelSetForAuth(auth.ID),
 	}
 }
 
@@ -689,10 +691,12 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	previousState := entry.state
 	previousNextRetryAt := entry.nextRetryAt
 	previousPriority := 0
+	previousQuotaRoutingSignature := ""
 	previousParent := ""
 	previousWebsocketEnabled := false
 	if entry.meta != nil {
-		previousPriority = entry.meta.priority
+		previousPriority = scheduledMetaPriority(entry.meta, m.strategy)
+		previousQuotaRoutingSignature = entry.meta.quotaRoutingSignature
 		previousParent = entry.meta.virtualParent
 		previousWebsocketEnabled = entry.meta.websocketEnabled
 	}
@@ -714,7 +718,8 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 		entry.nextRetryAt = next
 	}
 
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousParent == meta.virtualParent && previousWebsocketEnabled == meta.websocketEnabled {
+	currentPriority := scheduledMetaPriority(meta, m.strategy)
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == currentPriority && previousQuotaRoutingSignature == meta.quotaRoutingSignature && previousParent == meta.virtualParent && previousWebsocketEnabled == meta.websocketEnabled {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -929,14 +934,17 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
 func (m *modelScheduler) rebuildIndexesLocked() {
-	cursorStates := make(map[int]readyBucketCursorState, len(m.readyByPriority))
-	for priority, bucket := range m.readyByPriority {
-		if bucket == nil {
-			continue
-		}
-		cursorStates[priority] = readyBucketCursorState{
-			all: snapshotReadyViewCursors(bucket.all),
-			ws:  snapshotReadyViewCursors(bucket.ws),
+	cursorStates := make(map[int]readyBucketCursorState)
+	if m.strategy != schedulerStrategyQuotaRoundRobin {
+		cursorStates = make(map[int]readyBucketCursorState, len(m.readyByPriority))
+		for priority, bucket := range m.readyByPriority {
+			if bucket == nil {
+				continue
+			}
+			cursorStates[priority] = readyBucketCursorState{
+				all: snapshotReadyViewCursors(bucket.all),
+				ws:  snapshotReadyViewCursors(bucket.ws),
+			}
 		}
 	}
 
@@ -950,7 +958,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		}
 		switch entry.state {
 		case scheduledStateReady:
-			priority := entry.meta.priority
+			priority := scheduledMetaPriority(entry.meta, m.strategy)
 			priorityBuckets[priority] = append(priorityBuckets[priority], entry)
 		case scheduledStateCooldown, scheduledStateBlocked:
 			m.blocked = append(m.blocked, entry)
@@ -986,6 +994,13 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		}
 		return left.nextRetryAt.Before(right.nextRetryAt)
 	})
+}
+
+func scheduledMetaPriority(meta *scheduledAuthMeta, strategy schedulerStrategy) int {
+	if meta == nil || strategy == schedulerStrategyQuotaRoundRobin {
+		return 0
+	}
+	return meta.priority
 }
 
 func sortScheduledAuths(entries []*scheduledAuth, strategy schedulerStrategy) {

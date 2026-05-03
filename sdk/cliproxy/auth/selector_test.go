@@ -61,7 +61,7 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	}
 }
 
-func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
+func TestRoundRobinSelectorPick_IgnoresPriorityForQuotaRouting(t *testing.T) {
 	t.Parallel()
 
 	selector := &RoundRobinSelector{}
@@ -71,7 +71,7 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 		{ID: "b", Attributes: map[string]string{"priority": "10"}},
 	}
 
-	want := []string{"a", "b", "a", "b"}
+	want := []string{"a", "b", "c", "a"}
 	for i, id := range want {
 		got, err := selector.Pick(context.Background(), "mixed", "", cliproxyexecutor.Options{}, auths)
 		if err != nil {
@@ -82,9 +82,6 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 		}
 		if got.ID != id {
 			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
-		}
-		if got.ID == "c" {
-			t.Fatalf("Pick() #%d unexpectedly selected lower priority auth", i)
 		}
 	}
 }
@@ -1631,7 +1628,7 @@ func TestQuotaRoundRobinSelectorPick_UsedPercentFallback(t *testing.T) {
 	}
 }
 
-func TestQuotaRoundRobinSelectorPick_PriorityOverridesQuota(t *testing.T) {
+func TestQuotaRoundRobinSelectorPick_QuotaOverridesPriority(t *testing.T) {
 	t.Parallel()
 
 	selector := &QuotaRoundRobinSelector{}
@@ -1644,8 +1641,28 @@ func TestQuotaRoundRobinSelectorPick_PriorityOverridesQuota(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
-	if got == nil || got.ID != "high-priority-low-quota" {
-		t.Fatalf("Pick() auth.ID = %q, want high-priority-low-quota", selectorTestAuthID(got))
+	if got == nil || got.ID != "low-priority-high-quota" {
+		t.Fatalf("Pick() auth.ID = %q, want low-priority-high-quota", selectorTestAuthID(got))
+	}
+}
+
+func TestQuotaRoundRobinSelectorPick_UsedFullQuotaFallsBehindResetCandidate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	selector := &QuotaRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "used-full-a", Provider: "codex", Status: StatusActive, Metadata: usedFullQuotaMetadata(now)},
+		{ID: "used-full-b", Provider: "codex", Status: StatusActive, Metadata: usedFullQuotaMetadata(now)},
+		{ID: "used-quota-soon-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(10*time.Minute))},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.1-codex", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "used-quota-soon-reset" {
+		t.Fatalf("Pick() auth.ID = %q, want used-quota-soon-reset", selectorTestAuthID(got))
 	}
 }
 
@@ -1684,4 +1701,10 @@ func weeklyQuotaMetadataWithResetAfter(remainingPercent float64, updatedAt time.
 			},
 		},
 	}
+}
+
+func usedFullQuotaMetadata(updatedAt time.Time) map[string]any {
+	metadata := weeklyQuotaMetadata(100, updatedAt.Add(time.Hour))
+	metadata[quotaRoutingLastUsedAtKey] = updatedAt.Add(time.Minute).Format(time.RFC3339Nano)
+	return metadata
 }
