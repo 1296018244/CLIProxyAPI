@@ -578,3 +578,22 @@ func TestSchedulerPick_QuotaRoundRobinOrdersByRemainingQuota(t *testing.T) {
 		t.Fatalf("pickSingle() auth.ID = %q, want z-high", selectorTestAuthID(got))
 	}
 }
+
+func TestSchedulerPick_QuotaRoundRobinOrdersByResetTime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	scheduler := newSchedulerForTest(
+		&QuotaRoundRobinSelector{},
+		&Auth{ID: "higher-quota-later-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(95, now.Add(3*time.Hour))},
+		&Auth{ID: "lower-quota-sooner-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(50, now.Add(15*time.Minute))},
+	)
+
+	got, errPick := scheduler.pickSingle(context.Background(), "codex", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil || got.ID != "lower-quota-sooner-reset" {
+		t.Fatalf("pickSingle() auth.ID = %q, want lower-quota-sooner-reset", selectorTestAuthID(got))
+	}
+}

@@ -32,6 +32,9 @@ func TestBundledManagementHTMLContainsUsageStatsPanel(t *testing.T) {
 	if !bytes.Contains(data, []byte("quota_sort_label")) || !bytes.Contains(data, []byte("quotaSortOptions")) {
 		t.Fatal("bundled management panel does not contain quota sorting controls")
 	}
+	if !bytes.Contains(data, []byte("quota_sort_reset_soon")) || !bytes.Contains(data, []byte("quotaResetMetric")) {
+		t.Fatal("bundled management panel does not contain reset-aware quota sorting controls")
+	}
 	if bytes.Contains(data, []byte(`Use the top "Refresh all credentials" button`)) {
 		t.Fatal("bundled management panel still points idle hint at refresh-all only")
 	}

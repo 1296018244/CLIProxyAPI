@@ -134,21 +134,66 @@ func authPriority(auth *Auth) int {
 	return parsed
 }
 
+type authQuotaRoutingInfo struct {
+	remaining    float64
+	hasRemaining bool
+	resetAt      time.Time
+	hasReset     bool
+}
+
 func authRemainingQuotaPercent(auth *Auth) (float64, bool) {
+	info := authQuotaRoutingInfoForAuth(auth)
+	return info.remaining, info.hasRemaining
+}
+
+func authQuotaRoutingInfoForAuth(auth *Auth) authQuotaRoutingInfo {
 	if auth == nil {
-		return 0, false
+		return authQuotaRoutingInfo{}
 	}
-	if value, ok := quotaPercentFromMap(auth.Metadata, true); ok {
-		return value, true
+	if info := quotaRoutingInfoFromMap(auth.Metadata, true); info.hasRemaining || info.hasReset {
+		return info
 	}
 	if len(auth.Attributes) == 0 {
-		return 0, false
+		return authQuotaRoutingInfo{}
 	}
 	attrMap := make(map[string]any, len(auth.Attributes))
 	for key, value := range auth.Attributes {
 		attrMap[key] = value
 	}
-	return quotaPercentFromMap(attrMap, true)
+	return quotaRoutingInfoFromMap(attrMap, true)
+}
+
+func quotaRoutingInfoFromMap(values map[string]any, allowDirect bool) authQuotaRoutingInfo {
+	info := authQuotaRoutingInfo{}
+	if len(values) == 0 {
+		return info
+	}
+	window, context, okWindow := weeklyQuotaWindowFromMap(values)
+	if okWindow {
+		if pct, ok := quotaPercentFromWindow(window); ok {
+			info.remaining = pct
+			info.hasRemaining = true
+		}
+		if info.hasRemaining && info.remaining < 100 {
+			if resetAt, ok := quotaResetAtFromWindow(window, context); ok {
+				info.resetAt = resetAt
+				info.hasReset = true
+			}
+		}
+	}
+	if !info.hasRemaining && allowDirect {
+		if pct, ok := directQuotaPercentFromMap(values); ok {
+			info.remaining = pct
+			info.hasRemaining = true
+		}
+	}
+	if !info.hasReset && allowDirect && info.hasRemaining && info.remaining < 100 {
+		if resetAt, ok := directQuotaResetAtFromMap(values); ok {
+			info.resetAt = resetAt
+			info.hasReset = true
+		}
+	}
+	return info
 }
 
 func quotaPercentFromMap(values map[string]any, allowDirect bool) (float64, bool) {
@@ -161,18 +206,54 @@ func quotaPercentFromMap(values map[string]any, allowDirect bool) (float64, bool
 		}
 	}
 	if allowDirect {
-		for _, key := range []string{"quota_remaining_percent", "remaining_percent", "codex_quota_remaining_percent", "quota_percent"} {
-			if pct, ok := parseQuotaPercent(values[key], true); ok {
-				return pct, true
-			}
+		return directQuotaPercentFromMap(values)
+	}
+	return 0, false
+}
+
+func directQuotaPercentFromMap(values map[string]any) (float64, bool) {
+	for _, key := range []string{"quota_remaining_percent", "remaining_percent", "codex_quota_remaining_percent", "quota_percent"} {
+		if pct, ok := parseQuotaPercent(values[key], true); ok {
+			return pct, true
 		}
-		for _, key := range []string{"used_percent", "usedPercent"} {
-			if pct, ok := parseQuotaPercent(values[key], true); ok {
-				return clampPercent(100 - pct), true
-			}
+	}
+	for _, key := range []string{"used_percent", "usedPercent"} {
+		if pct, ok := parseQuotaPercent(values[key], true); ok {
+			return clampPercent(100 - pct), true
 		}
 	}
 	return 0, false
+}
+
+func weeklyQuotaWindowFromMap(values map[string]any) (map[string]any, map[string]any, bool) {
+	if quota, ok := nestedMap(values, "quota"); ok {
+		if window, okWindow := weeklyQuotaWindowFromAny(quota["windows"]); okWindow {
+			return window, quota, true
+		}
+	}
+	if window, ok := weeklyQuotaWindowFromAny(values["windows"]); ok {
+		return window, values, true
+	}
+	return nil, nil, false
+}
+
+func weeklyQuotaWindowFromAny(raw any) (map[string]any, bool) {
+	switch windows := raw.(type) {
+	case []any:
+		for _, item := range windows {
+			window, ok := item.(map[string]any)
+			if ok && isWeeklyQuotaWindow(window) {
+				return window, true
+			}
+		}
+	case []map[string]any:
+		for _, window := range windows {
+			if isWeeklyQuotaWindow(window) {
+				return window, true
+			}
+		}
+	}
+	return nil, false
 }
 
 func quotaPercentFromWindows(raw any) (float64, bool) {
@@ -232,6 +313,12 @@ func nestedValue(values map[string]any, path ...string) any {
 	return current
 }
 
+func nestedMap(values map[string]any, path ...string) (map[string]any, bool) {
+	raw := nestedValue(values, path...)
+	m, ok := raw.(map[string]any)
+	return m, ok
+}
+
 func parseQuotaPercent(raw any, fractionAllowed bool) (float64, bool) {
 	switch value := raw.(type) {
 	case nil:
@@ -284,18 +371,160 @@ func clampPercent(value float64) float64 {
 	return value
 }
 
+func quotaResetAtFromWindow(window map[string]any, context map[string]any) (time.Time, bool) {
+	for _, key := range []string{"reset_at_ms", "resetAtMs", "reset_at", "resetAt"} {
+		if resetAt, ok := parseQuotaResetTimestamp(window[key]); ok {
+			return resetAt, true
+		}
+	}
+	for _, key := range []string{"reset_after_seconds", "resetAfterSeconds"} {
+		resetAfter, ok := parseQuotaNumber(window[key])
+		if !ok || resetAfter <= 0 {
+			continue
+		}
+		updatedAt, okUpdated := quotaUpdatedAt(context)
+		if !okUpdated {
+			continue
+		}
+		return updatedAt.Add(time.Duration(resetAfter * float64(time.Second))), true
+	}
+	return time.Time{}, false
+}
+
+func directQuotaResetAtFromMap(values map[string]any) (time.Time, bool) {
+	for _, key := range []string{"quota_reset_at_ms", "quotaResetAtMs", "quota_reset_at", "quotaResetAt", "codex_quota_reset_at", "reset_at", "resetAt"} {
+		if resetAt, ok := parseQuotaResetTimestamp(values[key]); ok {
+			return resetAt, true
+		}
+	}
+	for _, key := range []string{"quota_reset_after_seconds", "quotaResetAfterSeconds", "codex_quota_reset_after_seconds", "reset_after_seconds", "resetAfterSeconds"} {
+		resetAfter, ok := parseQuotaNumber(values[key])
+		if !ok || resetAfter <= 0 {
+			continue
+		}
+		updatedAt, okUpdated := quotaUpdatedAt(values)
+		if !okUpdated {
+			continue
+		}
+		return updatedAt.Add(time.Duration(resetAfter * float64(time.Second))), true
+	}
+	return time.Time{}, false
+}
+
+func parseQuotaResetTimestamp(raw any) (time.Time, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return time.Time{}, false
+	case time.Time:
+		if value.IsZero() {
+			return time.Time{}, false
+		}
+		return value.UTC(), true
+	case string:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return time.Time{}, false
+		}
+		if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return parsed.UTC(), true
+		}
+		number, err := strconv.ParseFloat(trimmed, 64)
+		if err != nil {
+			return time.Time{}, false
+		}
+		return unixTimeFromQuotaNumber(number)
+	default:
+		number, ok := parseQuotaNumber(raw)
+		if !ok {
+			return time.Time{}, false
+		}
+		return unixTimeFromQuotaNumber(number)
+	}
+}
+
+func unixTimeFromQuotaNumber(value float64) (time.Time, bool) {
+	if value <= 0 {
+		return time.Time{}, false
+	}
+	if value > 1e12 {
+		return time.UnixMilli(int64(value)).UTC(), true
+	}
+	seconds := int64(value)
+	nanos := int64((value - float64(seconds)) * 1e9)
+	return time.Unix(seconds, nanos).UTC(), true
+}
+
+func quotaUpdatedAt(values map[string]any) (time.Time, bool) {
+	if len(values) == 0 {
+		return time.Time{}, false
+	}
+	for _, key := range []string{"updated_at", "updatedAt"} {
+		if updatedAt, ok := parseQuotaResetTimestamp(values[key]); ok {
+			return updatedAt, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func parseQuotaNumber(raw any) (float64, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return 0, false
+	case float64:
+		return value, true
+	case float32:
+		return float64(value), true
+	case int:
+		return float64(value), true
+	case int64:
+		return float64(value), true
+	case int32:
+		return float64(value), true
+	case json.Number:
+		parsed, err := value.Float64()
+		return parsed, err == nil
+	case string:
+		trimmed := strings.TrimSpace(strings.TrimSuffix(value, "%"))
+		if trimmed == "" {
+			return 0, false
+		}
+		parsed, err := strconv.ParseFloat(trimmed, 64)
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
 func sortAuthsByQuotaThenID(auths []*Auth) {
 	sort.Slice(auths, func(i, j int) bool {
-		leftQuota, leftOK := authRemainingQuotaPercent(auths[i])
-		rightQuota, rightOK := authRemainingQuotaPercent(auths[j])
-		if leftOK != rightOK {
-			return leftOK
-		}
-		if leftOK && rightOK && leftQuota != rightQuota {
-			return leftQuota > rightQuota
-		}
-		return auths[i].ID < auths[j].ID
+		return authQuotaRoutingLess(auths[i], auths[j])
 	})
+}
+
+func authQuotaRoutingLess(left, right *Auth) bool {
+	leftInfo := authQuotaRoutingInfoForAuth(left)
+	rightInfo := authQuotaRoutingInfoForAuth(right)
+	if leftInfo.hasReset != rightInfo.hasReset {
+		return leftInfo.hasReset
+	}
+	if leftInfo.hasReset && rightInfo.hasReset && !leftInfo.resetAt.Equal(rightInfo.resetAt) {
+		return leftInfo.resetAt.Before(rightInfo.resetAt)
+	}
+	if leftInfo.hasRemaining != rightInfo.hasRemaining {
+		return leftInfo.hasRemaining
+	}
+	if leftInfo.hasRemaining && rightInfo.hasRemaining && leftInfo.remaining != rightInfo.remaining {
+		return leftInfo.remaining > rightInfo.remaining
+	}
+	leftID := ""
+	if left != nil {
+		leftID = left.ID
+	}
+	rightID := ""
+	if right != nil {
+		rightID = right.ID
+	}
+	return leftID < rightID
 }
 
 func canonicalModelKey(model string) string {

@@ -965,14 +965,7 @@ func sortScheduledAuths(entries []*scheduledAuth, strategy schedulerStrategy) {
 		left := entries[i]
 		right := entries[j]
 		if strategy == schedulerStrategyQuotaRoundRobin {
-			leftQuota, leftOK := authRemainingQuotaPercent(left.auth)
-			rightQuota, rightOK := authRemainingQuotaPercent(right.auth)
-			if leftOK != rightOK {
-				return leftOK
-			}
-			if leftOK && rightOK && leftQuota != rightQuota {
-				return leftQuota > rightQuota
-			}
+			return authQuotaRoutingLess(left.auth, right.auth)
 		}
 		return left.auth.ID < right.auth.ID
 	})

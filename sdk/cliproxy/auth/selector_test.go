@@ -1495,6 +1495,82 @@ func TestRoundRobinSelectorPick_OrdersByRemainingQuota(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_ResetSoonBeforeHigherQuota(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "higher-quota-later-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(94, now.Add(2*time.Hour))},
+		{ID: "lower-quota-sooner-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(40, now.Add(10*time.Minute))},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "lower-quota-sooner-reset" {
+		t.Fatalf("Pick() auth.ID = %q, want lower-quota-sooner-reset", selectorTestAuthID(got))
+	}
+}
+
+func TestRoundRobinSelectorPick_FullQuotaDoesNotUseResetPriority(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "full-quota-soon-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(100, now.Add(time.Minute))},
+		{ID: "used-quota-later-reset", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(80, now.Add(time.Hour))},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "used-quota-later-reset" {
+		t.Fatalf("Pick() auth.ID = %q, want used-quota-later-reset", selectorTestAuthID(got))
+	}
+}
+
+func TestRoundRobinSelectorPick_ResetTieUsesRemainingQuota(t *testing.T) {
+	t.Parallel()
+
+	resetAt := time.Date(2026, 5, 3, 12, 30, 0, 0, time.UTC)
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "lower-quota", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(70, resetAt)},
+		{ID: "higher-quota", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadata(90, resetAt)},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "higher-quota" {
+		t.Fatalf("Pick() auth.ID = %q, want higher-quota", selectorTestAuthID(got))
+	}
+}
+
+func TestRoundRobinSelectorPick_ResetAfterSecondsUsesQuotaUpdatedAt(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC)
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "later-reset-after", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadataWithResetAfter(95, now, 3*time.Hour)},
+		{ID: "sooner-reset-after", Provider: "codex", Status: StatusActive, Metadata: weeklyQuotaMetadataWithResetAfter(50, now, 15*time.Minute)},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "sooner-reset-after" {
+		t.Fatalf("Pick() auth.ID = %q, want sooner-reset-after", selectorTestAuthID(got))
+	}
+}
+
 func TestQuotaRoundRobinSelectorPick_UsedPercentFallback(t *testing.T) {
 	t.Parallel()
 
@@ -1536,4 +1612,34 @@ func selectorTestAuthID(auth *Auth) string {
 		return ""
 	}
 	return auth.ID
+}
+
+func weeklyQuotaMetadata(remainingPercent float64, resetAt time.Time) map[string]any {
+	return map[string]any{
+		"quota": map[string]any{
+			"updated_at": time.Date(2026, 5, 3, 12, 0, 0, 0, time.UTC).Format(time.RFC3339),
+			"windows": []any{
+				map[string]any{
+					"id":                "code-7d",
+					"remaining_percent": remainingPercent,
+					"reset_at":          resetAt.Unix(),
+				},
+			},
+		},
+	}
+}
+
+func weeklyQuotaMetadataWithResetAfter(remainingPercent float64, updatedAt time.Time, resetAfter time.Duration) map[string]any {
+	return map[string]any{
+		"quota": map[string]any{
+			"updated_at": updatedAt.Format(time.RFC3339),
+			"windows": []any{
+				map[string]any{
+					"id":                  "code-7d",
+					"remaining_percent":   remainingPercent,
+					"reset_after_seconds": resetAfter.Seconds(),
+				},
+			},
+		},
+	}
 }
