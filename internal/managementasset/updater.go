@@ -93,6 +93,10 @@ func runAutoUpdater(ctx context.Context) {
 			log.Debug("management asset auto-updater skipped: disable-auto-update-panel is enabled")
 			return
 		}
+		if autoUpdateDisabledByEnv() {
+			log.Debug("management asset auto-updater skipped: MANAGEMENT_DISABLE_AUTO_UPDATE_PANEL is enabled")
+			return
+		}
 
 		configPath, _ := schedulerConfigPath.Load().(string)
 		staticDir := StaticDir(configPath)
@@ -108,6 +112,15 @@ func runAutoUpdater(ctx context.Context) {
 		case <-ticker.C:
 			runOnce()
 		}
+	}
+}
+
+func autoUpdateDisabledByEnv() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("MANAGEMENT_DISABLE_AUTO_UPDATE_PANEL"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
 
