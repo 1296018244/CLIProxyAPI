@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	defaultCodexQuotaRefreshConcurrency = 2
-	maxCodexQuotaRefreshConcurrency     = 5
-	defaultCodexQuotaRefreshDelay       = 800 * time.Millisecond
+	defaultCodexQuotaRefreshConcurrency = 8
+	maxCodexQuotaRefreshConcurrency     = 20
+	defaultCodexQuotaRefreshDelay       = 100 * time.Millisecond
 	maxCodexQuotaRefreshDelay           = 10 * time.Second
 )
 
