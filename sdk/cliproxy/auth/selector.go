@@ -30,6 +30,11 @@ type RoundRobinSelector struct {
 	maxKeys int
 }
 
+// QuotaRoundRobinSelector round-robins credentials after sorting by remaining quota percentage.
+type QuotaRoundRobinSelector struct {
+	RoundRobinSelector
+}
+
 // FillFirstSelector selects the first available credential (deterministic ordering).
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
@@ -126,6 +131,170 @@ func authPriority(auth *Auth) int {
 		return 0
 	}
 	return parsed
+}
+
+func authRemainingQuotaPercent(auth *Auth) (float64, bool) {
+	if auth == nil {
+		return 0, false
+	}
+	if value, ok := quotaPercentFromMap(auth.Metadata, true); ok {
+		return value, true
+	}
+	if len(auth.Attributes) == 0 {
+		return 0, false
+	}
+	attrMap := make(map[string]any, len(auth.Attributes))
+	for key, value := range auth.Attributes {
+		attrMap[key] = value
+	}
+	return quotaPercentFromMap(attrMap, true)
+}
+
+func quotaPercentFromMap(values map[string]any, allowDirect bool) (float64, bool) {
+	if len(values) == 0 {
+		return 0, false
+	}
+	for _, path := range [][]string{{"quota", "windows"}, {"windows"}} {
+		if pct, ok := quotaPercentFromWindows(nestedValue(values, path...)); ok {
+			return pct, true
+		}
+	}
+	if allowDirect {
+		for _, key := range []string{"quota_remaining_percent", "remaining_percent", "codex_quota_remaining_percent", "quota_percent"} {
+			if pct, ok := parseQuotaPercent(values[key], true); ok {
+				return pct, true
+			}
+		}
+		for _, key := range []string{"used_percent", "usedPercent"} {
+			if pct, ok := parseQuotaPercent(values[key], true); ok {
+				return clampPercent(100 - pct), true
+			}
+		}
+	}
+	return 0, false
+}
+
+func quotaPercentFromWindows(raw any) (float64, bool) {
+	switch windows := raw.(type) {
+	case []any:
+		for _, item := range windows {
+			window, ok := item.(map[string]any)
+			if !ok || !isWeeklyQuotaWindow(window) {
+				continue
+			}
+			if pct, ok := quotaPercentFromWindow(window); ok {
+				return pct, true
+			}
+		}
+	case []map[string]any:
+		for _, window := range windows {
+			if !isWeeklyQuotaWindow(window) {
+				continue
+			}
+			if pct, ok := quotaPercentFromWindow(window); ok {
+				return pct, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func quotaPercentFromWindow(window map[string]any) (float64, bool) {
+	for _, key := range []string{"remaining_percent", "remainingPercent"} {
+		if pct, ok := parseQuotaPercent(window[key], true); ok {
+			return pct, true
+		}
+	}
+	for _, key := range []string{"used_percent", "usedPercent"} {
+		if pct, ok := parseQuotaPercent(window[key], true); ok {
+			return clampPercent(100 - pct), true
+		}
+	}
+	return 0, false
+}
+
+func isWeeklyQuotaWindow(window map[string]any) bool {
+	id := strings.TrimSpace(fmt.Sprint(window["id"]))
+	label := strings.TrimSpace(fmt.Sprint(window["label"]))
+	return strings.EqualFold(id, "code-7d") || strings.EqualFold(label, "7d")
+}
+
+func nestedValue(values map[string]any, path ...string) any {
+	var current any = values
+	for _, key := range path {
+		m, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		current = m[key]
+	}
+	return current
+}
+
+func parseQuotaPercent(raw any, fractionAllowed bool) (float64, bool) {
+	switch value := raw.(type) {
+	case nil:
+		return 0, false
+	case float64:
+		return normalizeQuotaPercent(value, fractionAllowed), true
+	case float32:
+		return normalizeQuotaPercent(float64(value), fractionAllowed), true
+	case int:
+		return normalizeQuotaPercent(float64(value), fractionAllowed), true
+	case int64:
+		return normalizeQuotaPercent(float64(value), fractionAllowed), true
+	case int32:
+		return normalizeQuotaPercent(float64(value), fractionAllowed), true
+	case json.Number:
+		parsed, err := value.Float64()
+		if err != nil {
+			return 0, false
+		}
+		return normalizeQuotaPercent(parsed, fractionAllowed), true
+	case string:
+		trimmed := strings.TrimSpace(strings.TrimSuffix(value, "%"))
+		if trimmed == "" {
+			return 0, false
+		}
+		parsed, err := strconv.ParseFloat(trimmed, 64)
+		if err != nil {
+			return 0, false
+		}
+		return normalizeQuotaPercent(parsed, fractionAllowed), true
+	default:
+		return 0, false
+	}
+}
+
+func normalizeQuotaPercent(value float64, fractionAllowed bool) float64 {
+	if fractionAllowed && value >= 0 && value <= 1 {
+		value *= 100
+	}
+	return clampPercent(value)
+}
+
+func clampPercent(value float64) float64 {
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func sortAuthsByQuotaThenID(auths []*Auth) {
+	sort.Slice(auths, func(i, j int) bool {
+		leftQuota, leftOK := authRemainingQuotaPercent(auths[i])
+		rightQuota, rightOK := authRemainingQuotaPercent(auths[j])
+		if leftOK != rightOK {
+			return leftOK
+		}
+		if leftOK && rightOK && leftQuota != rightQuota {
+			return leftQuota > rightQuota
+		}
+		return auths[i].ID < auths[j].ID
+	})
 }
 
 func canonicalModelKey(model string) string {
@@ -259,6 +428,14 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 // a two-level round-robin is used: first cycling across credential groups (parent
 // accounts), then cycling within each group's project auths.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return s.pick(ctx, provider, model, opts, auths, false)
+}
+
+func (s *QuotaRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	return s.RoundRobinSelector.pick(ctx, provider, model, opts, auths, true)
+}
+
+func (s *RoundRobinSelector) pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth, quotaAware bool) (*Auth, error) {
 	_ = opts
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
@@ -266,6 +443,9 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
+	if quotaAware && len(available) > 1 {
+		sortAuthsByQuotaThenID(available)
+	}
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
