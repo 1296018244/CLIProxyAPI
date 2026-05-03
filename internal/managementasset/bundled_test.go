@@ -17,8 +17,17 @@ func TestBundledManagementHTMLContainsUsageStatsPanel(t *testing.T) {
 	if bytes.Contains(data, []byte("cpa-codex-quota-refresh-all-helper")) {
 		t.Fatal("bundled management panel contains the deprecated floating quota refresh helper")
 	}
-	if !bytes.Contains(data, []byte(`const Ce="all",_e=D;_e.length!==0&&E(_e,Ce,$)`)) {
-		t.Fatal("bundled management panel refresh-all quota button does not target all filtered credentials")
+	if !bytes.Contains(data, []byte("refresh_page_credentials")) {
+		t.Fatal("bundled management panel does not contain refresh-page quota action")
+	}
+	if !bytes.Contains(data, []byte(`const Ce=he.current==="all"?"all":"page",_e=he.current==="all"?D:Y;_e.length!==0&&E(_e,Ce,$)`)) {
+		t.Fatal("bundled management panel does not keep separate page and all refresh scopes")
+	}
+	if bytes.Contains(data, []byte(`Use the top "Refresh all credentials" button`)) {
+		t.Fatal("bundled management panel still points idle hint at refresh-all only")
+	}
+	if !bytes.Contains(data, []byte("Use the top refresh buttons")) {
+		t.Fatal("bundled management panel does not mention the refresh buttons in idle hint")
 	}
 }
 
