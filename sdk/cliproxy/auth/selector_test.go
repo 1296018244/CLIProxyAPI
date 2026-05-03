@@ -1453,3 +1453,69 @@ func TestSessionAffinitySelector_Concurrent(t *testing.T) {
 	default:
 	}
 }
+
+func TestQuotaRoundRobinSelectorPick_OrdersByRemainingQuota(t *testing.T) {
+	t.Parallel()
+
+	selector := &QuotaRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "low", Metadata: map[string]any{"quota": map[string]any{"windows": []any{map[string]any{"id": "code-7d", "remaining_percent": 17}}}}},
+		{ID: "high-b", Metadata: map[string]any{"quota": map[string]any{"windows": []any{map[string]any{"id": "code-7d", "remaining_percent": 94}}}}},
+		{ID: "unknown"},
+		{ID: "high-a", Metadata: map[string]any{"quota": map[string]any{"windows": []any{map[string]any{"id": "code-7d", "remaining_percent": 94}}}}},
+	}
+
+	want := []string{"high-a", "high-b", "low", "unknown", "high-a"}
+	for i, id := range want {
+		got, err := selector.Pick(context.Background(), "codex", "gpt-5.1-codex", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil || got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, selectorTestAuthID(got), id)
+		}
+	}
+}
+
+func TestQuotaRoundRobinSelectorPick_UsedPercentFallback(t *testing.T) {
+	t.Parallel()
+
+	selector := &QuotaRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "used-90", Metadata: map[string]any{"quota": map[string]any{"windows": []any{map[string]any{"id": "code-7d", "used_percent": 90}}}}},
+		{ID: "used-20", Metadata: map[string]any{"quota": map[string]any{"windows": []any{map[string]any{"id": "code-7d", "used_percent": 20}}}}},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.1-codex", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "used-20" {
+		t.Fatalf("Pick() auth.ID = %q, want used-20", selectorTestAuthID(got))
+	}
+}
+
+func TestQuotaRoundRobinSelectorPick_PriorityOverridesQuota(t *testing.T) {
+	t.Parallel()
+
+	selector := &QuotaRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "low-priority-high-quota", Attributes: map[string]string{"priority": "0", "quota_remaining_percent": "100"}},
+		{ID: "high-priority-low-quota", Attributes: map[string]string{"priority": "10", "quota_remaining_percent": "1"}},
+	}
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5.1-codex", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "high-priority-low-quota" {
+		t.Fatalf("Pick() auth.ID = %q, want high-priority-low-quota", selectorTestAuthID(got))
+	}
+}
+
+func selectorTestAuthID(auth *Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return auth.ID
+}

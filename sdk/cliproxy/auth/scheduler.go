@@ -17,6 +17,7 @@ type schedulerStrategy int
 const (
 	schedulerStrategyCustom schedulerStrategy = iota
 	schedulerStrategyRoundRobin
+	schedulerStrategyQuotaRoundRobin
 	schedulerStrategyFillFirst
 )
 
@@ -59,6 +60,7 @@ type scheduledAuthMeta struct {
 // modelScheduler tracks ready and blocked auths for one provider/model combination.
 type modelScheduler struct {
 	modelKey        string
+	strategy        schedulerStrategy
 	entries         map[string]*scheduledAuth
 	priorityOrder   []int
 	readyByPriority map[int]*readyBucket
@@ -178,6 +180,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
+	case *QuotaRoundRobinSelector:
+		return schedulerStrategyQuotaRoundRobin
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:
@@ -252,7 +256,7 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 	if providerState == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	shard := providerState.ensureModelLocked(modelKey, time.Now())
+	shard := providerState.ensureModelLocked(modelKey, time.Now(), s.strategy)
 	if shard == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -312,7 +316,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if providerState == nil {
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
-		shard := providerState.ensureModelLocked(modelKey, time.Now())
+		shard := providerState.ensureModelLocked(modelKey, time.Now(), s.strategy)
 		predicate := func(entry *scheduledAuth) bool {
 			if entry == nil || entry.auth == nil || entry.auth.ID != pinnedAuthID {
 				return false
@@ -339,7 +343,7 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if providerState == nil {
 			continue
 		}
-		shard := providerState.ensureModelLocked(modelKey, now)
+		shard := providerState.ensureModelLocked(modelKey, now, s.strategy)
 		candidateShards[providerIndex] = shard
 		if shard == nil {
 			continue
@@ -438,7 +442,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if providerState == nil {
 			continue
 		}
-		shard := providerState.ensureModelLocked(canonicalModelKey(model), now)
+		shard := providerState.ensureModelLocked(canonicalModelKey(model), now, s.strategy)
 		if shard == nil {
 			continue
 		}
@@ -522,7 +526,7 @@ func (s *authScheduler) upsertAuthLocked(auth *Auth, now time.Time) {
 	}
 	meta := buildScheduledAuthMeta(auth)
 	s.authProviders[authID] = providerKey
-	s.ensureProviderLocked(providerKey).upsertAuthLocked(meta, now)
+	s.ensureProviderLocked(providerKey).upsertAuthLocked(meta, now, s.strategy)
 }
 
 // removeAuthLocked removes one auth from the scheduler while the scheduler mutex is held.
@@ -597,7 +601,7 @@ func supportedModelSetForAuth(authID string) map[string]struct{} {
 }
 
 // upsertAuthLocked updates every existing model shard that can reference the auth metadata.
-func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.Time) {
+func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.Time, strategy schedulerStrategy) {
 	if p == nil || meta == nil || meta.auth == nil {
 		return
 	}
@@ -605,6 +609,10 @@ func (p *providerScheduler) upsertAuthLocked(meta *scheduledAuthMeta, now time.T
 	for modelKey, shard := range p.modelShards {
 		if shard == nil {
 			continue
+		}
+		if shard.strategy != strategy {
+			shard.strategy = strategy
+			shard.rebuildIndexesLocked()
 		}
 		if !meta.supportsModel(modelKey) {
 			shard.removeEntryLocked(meta.auth.ID)
@@ -628,17 +636,22 @@ func (p *providerScheduler) removeAuthLocked(authID string) {
 }
 
 // ensureModelLocked returns the shard for modelKey, building it lazily from provider auths.
-func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *modelScheduler {
+func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time, strategy schedulerStrategy) *modelScheduler {
 	if p == nil {
 		return nil
 	}
 	modelKey = canonicalModelKey(modelKey)
 	if shard, ok := p.modelShards[modelKey]; ok && shard != nil {
+		if shard.strategy != strategy {
+			shard.strategy = strategy
+			shard.rebuildIndexesLocked()
+		}
 		shard.promoteExpiredLocked(now)
 		return shard
 	}
 	shard := &modelScheduler{
 		modelKey:        modelKey,
+		strategy:        strategy,
 		entries:         make(map[string]*scheduledAuth),
 		readyByPriority: make(map[int]*readyBucket),
 	}
@@ -918,9 +931,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		}
 	}
 	for priority, entries := range priorityBuckets {
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].auth.ID < entries[j].auth.ID
-		})
+		sortScheduledAuths(entries, m.strategy)
 		bucket := buildReadyBucket(entries)
 		if cursorState, ok := cursorStates[priority]; ok && bucket != nil {
 			restoreReadyViewCursors(&bucket.all, cursorState.all)
@@ -948,6 +959,24 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 			return true
 		}
 		return left.nextRetryAt.Before(right.nextRetryAt)
+	})
+}
+
+func sortScheduledAuths(entries []*scheduledAuth, strategy schedulerStrategy) {
+	sort.Slice(entries, func(i, j int) bool {
+		left := entries[i]
+		right := entries[j]
+		if strategy == schedulerStrategyQuotaRoundRobin {
+			leftQuota, leftOK := authRemainingQuotaPercent(left.auth)
+			rightQuota, rightOK := authRemainingQuotaPercent(right.auth)
+			if leftOK != rightOK {
+				return leftOK
+			}
+			if leftOK && rightOK && leftQuota != rightQuota {
+				return leftQuota > rightQuota
+			}
+		}
+		return left.auth.ID < right.auth.ID
 	})
 }
 

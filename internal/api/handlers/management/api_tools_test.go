@@ -210,3 +210,43 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
 	}
 }
+
+func TestCacheCodexQuotaFromAPICallPersistsWeeklyRemainingPercent(t *testing.T) {
+	t.Parallel()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{ID: "codex-auth", Provider: "codex", Metadata: map[string]any{"email": "codex@example.com"}}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	h := &Handler{authManager: manager}
+	body := []byte(`{"rate_limit":{"primary_window":{"used_percent":83,"limit_window_seconds":18000,"reset_after_seconds":3600},"secondary_window":{"used_percent":6,"limit_window_seconds":604800,"reset_after_seconds":7200}}}`)
+	h.maybeCacheCodexQuotaFromAPICall(context.Background(), auth, "https://chatgpt.com/backend-api/wham/usage", http.StatusOK, body)
+
+	updated, ok := manager.GetByID("codex-auth")
+	if !ok {
+		t.Fatal("updated auth not found")
+	}
+	quota, ok := updated.Metadata["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("quota metadata missing or invalid: %#v", updated.Metadata["quota"])
+	}
+	windows, ok := quota["windows"].([]any)
+	if !ok || len(windows) != 2 {
+		t.Fatalf("quota windows = %#v, want 2 windows", quota["windows"])
+	}
+	weekly, ok := windows[1].(map[string]any)
+	if !ok {
+		t.Fatalf("weekly window invalid: %#v", windows[1])
+	}
+	if weekly["id"] != "code-7d" {
+		t.Fatalf("weekly id = %v, want code-7d", weekly["id"])
+	}
+	if weekly["remaining_percent"] != float64(94) {
+		t.Fatalf("weekly remaining_percent = %#v, want 94", weekly["remaining_percent"])
+	}
+	if updated.Metadata["quota_remaining_percent"] != float64(94) {
+		t.Fatalf("quota_remaining_percent = %#v, want 94", updated.Metadata["quota_remaining_percent"])
+	}
+}
