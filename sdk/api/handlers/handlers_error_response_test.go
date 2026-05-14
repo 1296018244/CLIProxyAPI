@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,40 @@ func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	}
 	if got := recorder.Header().Get("X-Request-Id"); got != "" {
 		t.Fatalf("X-Request-Id should be empty when passthrough is disabled, got %q", got)
+	}
+}
+
+func TestBuildErrorResponseBody_SuppressesHTMLBlockedPage(t *testing.T) {
+	html := `<!DOCTYPE html><html lang="en"><head><title>Blocked</title></head><body><p>Your request was blocked by this site's web application firewall (WAF).</p></body></html>`
+
+	body := BuildErrorResponseBody(http.StatusBadGateway, html)
+
+	if strings.Contains(string(body), "<!DOCTYPE html>") || strings.Contains(string(body), "<html") {
+		t.Fatalf("raw HTML leaked into error body: %s", body)
+	}
+	var payload ErrorResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("error body is not JSON: %v; body=%s", err, body)
+	}
+	if !strings.Contains(payload.Error.Message, "Upstream returned an HTML blocked page") {
+		t.Fatalf("message = %q, want sanitized blocked-page diagnostic", payload.Error.Message)
+	}
+}
+
+func TestBuildErrorResponseBody_SuppressesHTMLBlockedPageInsideJSONError(t *testing.T) {
+	upstream := `{"error":{"message":"<!DOCTYPE html><html><head><title>Blocked</title></head><body>request was blocked by waf</body></html>","type":"server_error"}}`
+
+	body := BuildErrorResponseBody(http.StatusBadGateway, upstream)
+
+	if strings.Contains(string(body), "<!DOCTYPE html>") || strings.Contains(string(body), "<html") {
+		t.Fatalf("raw HTML leaked into JSON error body: %s", body)
+	}
+	var payload ErrorResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("error body is not JSON: %v; body=%s", err, body)
+	}
+	if !strings.Contains(payload.Error.Message, "Upstream returned an HTML blocked page") {
+		t.Fatalf("message = %q, want sanitized blocked-page diagnostic", payload.Error.Message)
 	}
 }
 

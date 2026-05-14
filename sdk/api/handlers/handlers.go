@@ -111,7 +111,14 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 	}
 
 	trimmed := strings.TrimSpace(errText)
+	if replacement, ok := sanitizeBlockedHTMLDiagnostic(trimmed); ok {
+		errText = replacement
+		trimmed = replacement
+	}
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
+		if sanitized, changed := sanitizeJSONErrorBody([]byte(trimmed)); changed {
+			return sanitized
+		}
 		return []byte(trimmed)
 	}
 
@@ -148,6 +155,74 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 		return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText))
 	}
 	return payload
+}
+
+func sanitizeJSONErrorBody(body []byte) ([]byte, bool) {
+	var payload any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body, false
+	}
+	sanitized, changed := sanitizeJSONValue(payload)
+	if !changed {
+		return body, false
+	}
+	out, err := json.Marshal(sanitized)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
+func sanitizeJSONValue(v any) (any, bool) {
+	switch value := v.(type) {
+	case string:
+		if replacement, ok := sanitizeBlockedHTMLDiagnostic(value); ok {
+			return replacement, true
+		}
+		return value, false
+	case []any:
+		changed := false
+		out := make([]any, len(value))
+		for i, item := range value {
+			next, itemChanged := sanitizeJSONValue(item)
+			out[i] = next
+			changed = changed || itemChanged
+		}
+		if changed {
+			return out, true
+		}
+		return value, false
+	case map[string]any:
+		changed := false
+		out := make(map[string]any, len(value))
+		for key, item := range value {
+			next, itemChanged := sanitizeJSONValue(item)
+			out[key] = next
+			changed = changed || itemChanged
+		}
+		if changed {
+			return out, true
+		}
+		return value, false
+	default:
+		return value, false
+	}
+}
+
+func sanitizeBlockedHTMLDiagnostic(text string) (string, bool) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return "", false
+	}
+	lower := strings.ToLower(trimmed)
+	hasHTML := strings.Contains(lower, "<!doctype html") || strings.Contains(lower, "<html")
+	hasBlockedMarker := strings.Contains(lower, "<title>blocked") ||
+		strings.Contains(lower, "web application firewall") ||
+		strings.Contains(lower, "request was blocked")
+	if !hasHTML || !hasBlockedMarker {
+		return "", false
+	}
+	return "Upstream returned an HTML blocked page (WAF/proxy rejection); raw HTML was suppressed. Check upstream routing, WAF rules, or request body filtering.", true
 }
 
 // StreamingKeepAliveInterval returns the SSE keep-alive interval for this server.
